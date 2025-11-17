@@ -64,3 +64,4 @@ void configServoPWM(void) {
     // --- Configuración del Pin de Salida PWM ---
     
     // El canal 1 del PWM (controlado por MR1) usa el pin MAT0.1
+}

@@ -1,0 +1,277 @@
+/*
+    SUMAMOS MAQUINA DE ESTADO PARA FUTURA COMPLEJIDAD
+ */
+
+#include "lpc17xx_pinsel.h"
+#include "lpc17xx_gpio.h"
+#include "lpc17xx_timer.h"
+#include "lpc17xx_adc.h"
+#include "lpc17xx_clkpwr.h"
+#include "lpc17xx_nvic.h"
+#include "lpc17xx_uart.h"
+#include <string.h>
+#include <stdint.h>
+#include <stdio.h>
+
+// --- Máquina de Estados ---
+#define MODO_MANUAL     0
+#define MODO_BUSQUEDA   1
+#define MODO_AGARRE     2
+
+// Variable global para el estado
+volatile int MODO_ACTUAL = MODO_MANUAL; // Inicia en modo manual
+
+#define SERVO_PIN   9     // P0.9
+#define SERVO_PIN2  8     // P0.8
+#define SERVO_PIN3  7     // P0.7
+
+#define ADC_CH3     3     // AD0.3 (P0.26)
+#define ADC_CH      4     // AD0.4 (P1.30)
+#define ADC_CH5     5     // AD0.5 (P1.31)
+
+#define SERVO_MIN_US 1000
+#define SERVO_MAX_US 2000
+
+volatile uint16_t valorADC1, valorADC2, valorADC3;
+volatile uint32_t pulso, pulso2, pulso3;
+
+volatile uint8_t flagUART = 0;     // bandera para enviar por UART
+volatile uint32_t pulso1_toSend = 0;
+
+// ---------------- UART ----------------
+#define TX_BUFFER_SIZE 128
+volatile char tx_buffer[TX_BUFFER_SIZE];
+volatile uint32_t tx_indice_lectura;
+volatile uint32_t tx_indice_escritura;
+// ---------------- UART ----------------
+
+// Mensaje a enviar. \r\n es para Salto de Línea en la terminal.
+const char mensaje[] = "Holamundo\r\n";
+
+// ---------------- UART ----------------
+void configGPIO_UART(void) {
+    PINSEL_CFG_Type psel_conf;
+
+    psel_conf.Portnum = 0;
+    psel_conf.Pinmode = PINSEL_PINMODE_TRISTATE;
+    psel_conf.OpenDrain = PINSEL_PINMODE_NORMAL;
+
+    // TXD0 -> P0.2
+    psel_conf.Pinnum = 2;
+    psel_conf.Funcnum = 1;
+    PINSEL_ConfigPin(&psel_conf);
+
+    // RXD0 -> P0.3
+    psel_conf.Pinnum = 3;
+    psel_conf.Funcnum = 1;
+    PINSEL_ConfigPin(&psel_conf);
+}
+
+void configUART(void) {
+    UART_CFG_Type uart_cfg;
+    UART_FIFO_CFG_Type fifo_cfg;
+
+    UART_ConfigStructInit(&uart_cfg);
+    UART_Init((LPC_UART_TypeDef *)LPC_UART0, &uart_cfg);
+
+    UART_FIFOConfigStructInit(&fifo_cfg);
+    UART_FIFOConfig((LPC_UART_TypeDef *)LPC_UART0, &fifo_cfg);
+
+    UART_TxCmd((LPC_UART_TypeDef *)LPC_UART0, ENABLE);
+}
+
+void UART0_IRQHandler(void) {
+    // 1. Verificar si la interrupción es por THRE (Buffer de envío vacío)
+    if (UART_GetIntId((LPC_UART_TypeDef *)LPC_UART0) & UART_IIR_INTID_THRE) {
+        
+        // 2. Comprobar si aún quedan caracteres por enviar
+        if (tx_buffer[tx_indice_lectura] != '\0') {
+            
+            // 3. Enviar UN SOLO caracter
+            UART_SendByte((LPC_UART_TypeDef *)LPC_UART0, tx_buffer[tx_indice_lectura]);
+            tx_indice_lectura++;
+            
+        } else {
+            // 4. Se terminó de enviar el string, deshabilitar esta interrupción
+            UART_IntConfig((LPC_UART_TypeDef *)LPC_UART0, UART_INTCFG_THRE, DISABLE);
+        }
+    }
+}
+
+// ---------------- GPIO ----------------
+void ConfGPIO(void) {
+    PINSEL_CFG_Type PinCfg;
+    PinCfg.Portnum = 0;
+    PinCfg.Funcnum = 0;
+    PinCfg.Pinmode = PINSEL_PINMODE_PULLUP;
+    PinCfg.OpenDrain = 0;
+
+    PINSEL_ConfigPin(&PinCfg);
+
+    GPIO_SetDir(0, (1 << SERVO_PIN), 1);
+    GPIO_SetDir(0, (1 << SERVO_PIN2), 1);
+    GPIO_SetDir(3, (1 << 25), 1);
+    GPIO_SetDir(3, (1 << 26), 1);
+}
+
+// ---------------- ADC ----------------
+void ConfADC(void) {
+    PINSEL_CFG_Type PinCfg;
+
+    // P1.30 -> AD0.4
+    PinCfg.Portnum = 1;
+    PinCfg.Pinnum = 30;
+    PinCfg.Funcnum = 3;
+    PinCfg.Pinmode = PINSEL_PINMODE_TRISTATE;
+    PinCfg.OpenDrain = 0;
+    PINSEL_ConfigPin(&PinCfg);
+
+    // P1.31 -> AD0.5
+    PinCfg.Pinnum = 31;
+    PINSEL_ConfigPin(&PinCfg);
+
+    // P0.26 -> AD0.3
+    PinCfg.Portnum = 0;
+    PinCfg.Pinnum = 26;
+    PINSEL_ConfigPin(&PinCfg);
+
+    ADC_Init(LPC_ADC, 1000);
+    ADC_BurstCmd(LPC_ADC, ENABLE);
+    ADC_ChannelCmd(LPC_ADC, ADC_CH, ENABLE);
+    ADC_ChannelCmd(LPC_ADC, ADC_CH5, ENABLE);
+    ADC_ChannelCmd(LPC_ADC, ADC_CH3, ENABLE);
+
+    ADC_IntConfig(LPC_ADC, ADC_CH, ENABLE);
+    ADC_IntConfig(LPC_ADC, ADC_CH5, ENABLE);
+    ADC_IntConfig(LPC_ADC, ADC_CH3, ENABLE);
+
+    ADC_StartCmd(LPC_ADC, ADC_START_CONTINUOUS);
+    NVIC_EnableIRQ(ADC_IRQn);
+}
+
+// ---------------- ADC IRQ ----------------
+void ADC_IRQHandler(void) {
+
+    // --- Canal 1 (Servo 1) ---
+    if (ADC_ChannelGetStatus(LPC_ADC, ADC_CH, 1)) {
+        
+        valorADC1 = ADC_ChannelGetData(LPC_ADC, ADC_CH);
+
+        if(valorADC1 >= 1948 && valorADC1 < 2147){
+            pulso = 1500;
+        } else if(valorADC1 < 1948){
+            pulso = 1000 + (uint32_t)(((float)valorADC1 / 1947.0f) * 500.0f);
+        } else {
+            pulso = 1500 + (uint32_t)(((float)(valorADC1 - 2147) / 1948.0f) * 500.0f);
+        }
+        TIM_UpdateMatchValue(LPC_TIM2, 1, pulso);
+    }
+
+    // --- Canal 2 (Servo 2) ---
+    else if (ADC_ChannelGetStatus(LPC_ADC, ADC_CH5, 1)) {
+        
+        valorADC2 = ADC_ChannelGetData(LPC_ADC, ADC_CH5);
+
+        if(valorADC2 >= 1948 && valorADC2 < 2147){
+            pulso2 = 1500;
+        } else if(valorADC2 < 1948){
+            pulso2 = 1000 + (uint32_t)(((float)valorADC2 / 1947.0f) * 500.0f);
+        } else {
+            pulso2 = 1500 + (uint32_t)(((float)(valorADC2 - 2147) / 1948.0f) * 500.0f);
+        }
+        TIM_UpdateMatchValue(LPC_TIM2, 2, pulso2);
+    }
+
+    // --- Canal 3 (Servo 3) ---
+    else if (ADC_ChannelGetStatus(LPC_ADC, ADC_CH3, 1)) {
+
+        valorADC3 = ADC_ChannelGetData(LPC_ADC, ADC_CH3);
+
+        if(valorADC3 >= 1948 && valorADC3 < 2147){
+            pulso3 = 1500;
+        } else if(valorADC3 < 1948){
+            pulso3 = 1000 + (uint32_t)(((float)valorADC3 / 1947.0f) * 500.0f);
+        } else {
+            pulso3 = 1500 + (uint32_t)(((float)(valorADC3 - 2147) / 1948.0f) * 500.0f);
+        }
+        TIM_UpdateMatchValue(LPC_TIM2, 3, pulso3);
+    }
+
+    sprintf((char*)tx_buffer, "Posicion servos: X=%u  Y=%u\r\n", valorADC1, valorADC2);
+    tx_indice_lectura = 0; // Prepara el índice
+
+    // Activa la interrupción de envío del UART
+    UART_IntConfig((LPC_UART_TypeDef *)LPC_UART0, UART_INTCFG_THRE, ENABLE);
+}
+// ---------------- TIMER2 ----------------
+void ConfTIMER2(void) {
+    TIM_TIMERCFG_Type timerCfg;
+    timerCfg.PrescaleOption = TIM_PRESCALE_USVAL;
+    timerCfg.PrescaleValue = 1;
+
+    TIM_Init(LPC_TIM2, TIM_TIMER_MODE, &timerCfg);
+
+    TIM_MATCHCFG_Type match0 = {0};
+    match0.MatchChannel = 0;
+    match0.IntOnMatch = ENABLE;
+    match0.ResetOnMatch = ENABLE;
+    match0.MatchValue = 20000;
+    TIM_ConfigMatch(LPC_TIM2, &match0);
+
+    TIM_MATCHCFG_Type match1 = {0};
+    match1.MatchChannel = 1;
+    match1.IntOnMatch = ENABLE;
+    match1.MatchValue = 1500;
+    TIM_ConfigMatch(LPC_TIM2, &match1);
+
+    TIM_MATCHCFG_Type match2 = {0};
+    match2.MatchChannel = 2;
+    match2.IntOnMatch = ENABLE;
+    match2.MatchValue = 1500;
+    TIM_ConfigMatch(LPC_TIM2, &match2);
+
+    TIM_MATCHCFG_Type match3 = {0};
+    match2.MatchChannel = 3;
+    match2.IntOnMatch = ENABLE;
+    match2.MatchValue = 1500;
+    TIM_ConfigMatch(LPC_TIM2, &match3);
+
+    NVIC_EnableIRQ(TIMER2_IRQn);
+    TIM_Cmd(LPC_TIM2, ENABLE);
+}
+
+// ---------------- TIMER2 IRQ ----------------
+void TIMER2_IRQHandler(void) {
+    if (TIM_GetIntStatus(LPC_TIM2, TIM_MR0_INT)) {
+
+        TIM_ClearIntPending(LPC_TIM2, TIM_MR0_INT);
+        GPIO_SetValue(0, (1 << SERVO_PIN));
+        GPIO_SetValue(0, (1 << SERVO_PIN2));
+        GPIO_SetValue(0, (1 << SERVO_PIN3));
+    }
+    if (TIM_GetIntStatus(LPC_TIM2, TIM_MR1_INT)) {
+        TIM_ClearIntPending(LPC_TIM2, TIM_MR1_INT);
+        GPIO_ClearValue(0, (1 << SERVO_PIN));
+    }
+    if (TIM_GetIntStatus(LPC_TIM2, TIM_MR2_INT)) {
+        TIM_ClearIntPending(LPC_TIM2, TIM_MR2_INT);
+        GPIO_ClearValue(0, (1 << SERVO_PIN2));
+    }
+    if (TIM_GetIntStatus(LPC_TIM2, TIM_MR3_INT)) {
+        TIM_ClearIntPending(LPC_TIM2, TIM_MR3_INT);
+        GPIO_ClearValue(0, (1 << SERVO_PIN3));
+    }
+}
+
+// ---------------- MAIN ----------------
+int main(void) {
+    ConfGPIO();
+    ConfADC();
+    ConfTIMER2();
+    configGPIO_UART();
+    configUART();
+
+    while (1) {
+
+        }
+    }
