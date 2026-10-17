@@ -22,10 +22,6 @@
 #include "lpc17xx_adc.h"
 #include "lpc17xx_clkpwr.h"
 #include "lpc17xx_nvic.h"
-#include "lpc17xx_uart.h"
-#include <string.h>
-#include <stdint.h>
-#include <stdio.h>
 
 // ---------------------------------------------------------------------------
 // Definiciones
@@ -52,44 +48,25 @@ volatile uint32_t pulso = 1500;
 volatile uint32_t pulso2 = 1500;
 volatile uint32_t pulso3 = 1500;
 
-volatile uint32_t counter = 0;
 
-
-// ---------------- UART ----------------
-void configGPIO_UART(void) {
-    PINSEL_CFG_Type psel_conf;
-
-    psel_conf.Portnum = 0;
-    psel_conf.Pinmode = PINSEL_PINMODE_TRISTATE;
-    psel_conf.OpenDrain = PINSEL_PINMODE_NORMAL;
-
-    // TXD0 -> P0.2
-    psel_conf.Pinnum = 2;
-    psel_conf.Funcnum = 1;
-    PINSEL_ConfigPin(&psel_conf);
-
-    // RXD0 -> P0.3
-    psel_conf.Pinnum = 3;
-    psel_conf.Funcnum = 1;
-    PINSEL_ConfigPin(&psel_conf);
+void confPin(void){
+	//Configuraci�n pin P0.26 como AOUT
+	PINSEL_CFG_Type pinsel_cfg;
+	pinsel_cfg.Portnum = 0;
+	pinsel_cfg.Pinnum = 26;
+	pinsel_cfg.Funcnum = 2;
+	pinsel_cfg.Pinmode = 0;
+	pinsel_cfg.OpenDrain = 0;
+	PINSEL_ConfigPin(&pinsel_cfg);
+	return;
 }
-// ---------------------------------------------------------------------------
-// Configuración UART
-// ---------------------------------------------------------------------------
-
-void configUART(void) {
-    UART_CFG_Type uart_cfg;
-    UART_FIFO_CFG_Type fifo_cfg;
-
-    UART_ConfigStructInit(&uart_cfg);
-    UART_Init((LPC_UART_TypeDef *)LPC_UART0, &uart_cfg);
-
-    UART_FIFOConfigStructInit(&fifo_cfg);
-    UART_FIFOConfig((LPC_UART_TypeDef *)LPC_UART0, &fifo_cfg);
-
-    UART_TxCmd((LPC_UART_TypeDef *)LPC_UART0, ENABLE);
+void confDAC(void){
+	DAC_Init (LPC_DAC);
 }
-
+void delay(){
+	for (uint32_t i=0;i<4000000;i++){}
+	return;
+}
 
 // ---------------------------------------------------------------------------
 // Configuración GPIO
@@ -269,17 +246,6 @@ void TIMER2_IRQHandler(void)
     // MATCH0 → reinicia ciclo PWM
     if (TIM_GetIntStatus(LPC_TIM2, TIM_MR0_INT))
     {
-    	
-    	counter++;
-    	if(counter >= 50){
-
-    	    char mensaje[64];
-    	    sprintf(mensaje, "Pulsos: S1=%lu us  S2=%lu us\r\n", pulso, pulso2);
-    	    UART_Send((LPC_UART_TypeDef *)LPC_UART0, (uint8_t *)mensaje, strlen(mensaje), NONE_BLOCKING);
-
-    	    counter = 0;
-    	}
-    	
         TIM_ClearIntPending(LPC_TIM2, TIM_MR0_INT);
         GPIO_SetValue(0, (1<<SERVO_PIN));
         GPIO_SetValue(0, (1<<SERVO_PIN2));
@@ -316,11 +282,16 @@ int main(void)
     ConfGPIO();    // Configurar pines de servos
     ConfADC();     // Configurar ADC (3 potenciómetros)
     ConfTIMER2();  // Configurar Timer2 para PWM software
-    configGPIO_UART();
-    configUART();
+
+    uint32_t dac_value[11]={0,123,223,323,423,523,623,723,823,923,1023};
+	confPin();
+	confDAC();
 
     while (1)
     {
-        // Loop vacío, control manejado por interrupciones
+		for(uint8_t conta = 0;conta<11;conta++){
+			DAC_UpdateValue(LPC_DAC,dac_value[conta]);
+			delay();
+		}
     }
 }

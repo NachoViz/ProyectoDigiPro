@@ -234,7 +234,7 @@ void DMA_IRQHandler(void) {
         confDMA_ADC(); 
         
         GPDMA_ClearIntPending(GPDMA_STATCLR_INTTC, 0);
-    }
+}
     
     // Limpiar error si ocurre
     if (GPDMA_IntGetStatus(GPDMA_STAT_INTERR, 0)) {
